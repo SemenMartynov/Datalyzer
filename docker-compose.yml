@@ -1,0 +1,171 @@
+# Datalyzer
+version: '2'
+
+services:
+
+  # =================
+  # Graphite & Statsd
+  graphite:
+    image: hopsoft/graphite-statsd
+    container_name: graphite
+    hostname: graphite
+    #restart: always
+    logging:
+      driver: json-file
+
+  # =================
+  # Manage topology information
+  lookupd:
+    image: nsqio/nsq:latest
+    container_name: lookupd
+    hostname: lookupd
+    #restart: always
+    expose:
+    - "4160" # listen on for TCP clients
+    - "4161" # listen on for HTTP clients
+    logging:
+      driver: json-file
+    command: /nsqlookupd
+
+
+  # =================
+  # The daemon that receives, queues, and delivers messages to clients
+  nsqd:
+    image: nsqio/nsq:latest
+    container_name: nsqd
+    hostname: nsqd
+    #restart: always
+    depends_on:
+      - lookupd
+      - graphite
+    expose:
+    - "4150" # listen on for TCP clients
+    - "4151" # listen on for HTTP clients
+    logging:
+      driver: json-file
+    command: /nsqd --lookupd-tcp-address=lookupd:4160 --data-path=/data --statsd-address=graphite:8125
+    volumes:
+#    - "/home/sam/docker/log/mysql:/var/log/mysql" # logs
+#    - "/tmp/docker/nsq/tmp:/tmp" # tmpfs
+#    - "/tmp/docker/nsq/run:/run" # tmpfs
+    - nsqd-data:/data # data
+
+  # =================
+  # Web UI to view aggregated cluster stats
+  nsqadmin:
+    image: nsqio/nsq:latest
+    container_name: nsqadmin
+    hostname: nsqadmin
+    #restart: always
+    depends_on:
+      - lookupd
+      - graphite
+    expose:
+    - "4171" # listen on for HTTP clients
+    logging:
+      driver: json-file
+    command: /nsqadmin --lookupd-http-address=lookupd:4161 --graphite-url=graphite
+
+  # =================
+  # Producer
+  producer:
+    build: ./producer
+    container_name: producer
+    hostname: producer
+    #restart: always
+    depends_on:
+      - lookupd
+#    logging:
+#      driver: json-file
+    command: /bin/producer -nsqd=nsqd:4150 # via tcp
+
+  # =================
+  # Consumer
+  consumer:
+    build: ./consumer
+    container_name: consumer
+    hostname: consumer
+    #restart: always
+    depends_on:
+      - lookupd
+      - perconasrv
+#    logging:
+#      driver: json-file
+    command: /bin/consumer -nsqd=nsqd:4150 -dbhost=perconasrv
+
+  # =================
+  # Database
+  perconasrv:
+    image: percona:latest
+    container_name: perconasrv
+    hostname: perconasrv
+    #restart: always
+    environment:
+    - MYSQL_ROOT_PASSWORD=root
+    expose:
+    - "3306"
+    logging:
+      driver: json-file
+    volumes:
+    - database-data:/var/lib/mysql # data
+# $ docker exec -ti perconasrv /bin/mysql -u root -p
+# mysql> CREATE DATABASE caraveldb CHARACTER SET utf8 COLLATE utf8_general_ci;
+# mysql> GRANT ALL PRIVILEGES ON caraveldb.* TO "caravel"@'%' IDENTIFIED BY "caravel";
+# mysql> FLUSH PRIVILEGES;
+# mysql> EXIT
+
+# $ docker exec -ti perconasrv /bin/mysql -u root -p
+# mysql> CREATE DATABASE testdb CHARACTER SET utf8 COLLATE utf8_general_ci;
+# mysql> CREATE TABLE testdb.kvtable ( id INT NOT NULL AUTO_INCREMENT , value INT NOT NULL , PRIMARY KEY (id)) ENGINE = InnoDB;
+# mysql> GRANT ALL PRIVILEGES ON testdb.* TO "caravel"@'%' IDENTIFIED BY "caravel";
+# mysql> FLUSH PRIVILEGES;
+# mysql> EXIT
+
+  # =================
+  # Caravel
+  caravel:
+    image: amancevice/caravel
+    container_name: caravel
+    hostname: caravel
+    #restart: always
+    depends_on:
+      - perconasrv
+    environment:
+    - SECRET_KEY="mySUPERsecretKEY"
+    - SQLALCHEMY_DATABASE_URI=mysql://caravel:caravel@perconasrv:3306/caraveldb
+    expose:
+    - "8088"
+    logging:
+      driver: json-file
+# Create an admin user
+#   $ docker exec -ti caravel fabmanager create-admin --app caravel
+# Initialize the database
+#   $ docker exec caravel caravel db upgrade
+# Create default roles and permissions
+#   $ docker exec caravel caravel init
+
+  # =================
+  # phpMyAdmin
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: phpmyadmin
+    hostname: phpmyadmin
+    #restart: always
+    depends_on:
+      - perconasrv
+    environment:
+    - PMA_HOST=perconasrv
+    ports:
+     - 8080:80
+    logging:
+      driver: json-file
+
+volumes:
+# docker volume create --name=nsqd-data
+  nsqd-data:
+    external:
+      name: nsqd-data
+# docker volume create --name=database-data
+  database-data:
+    external:
+      name: database-data
